@@ -190,10 +190,10 @@ do_clean() {
     local dirty; dirty=$(_ssh "git -C $PROD_DIR status --porcelain 2>/dev/null")
     [[ -z "$dirty" ]] && { say "already clean"; return; }
     echo "$dirty"
-    echo -n "  git checkout -- . && git clean -fd? [y/N] "
+    echo -n "  git reset --hard HEAD && git clean -fd? [y/N] "
     read -r REPLY
     [[ "$REPLY" =~ ^[Yy]$ ]] || { say "cancelled"; return; }
-    _ssh "cd $PROD_DIR && git checkout -- . && git clean -fd"
+    _ssh "cd $PROD_DIR && git reset --hard HEAD && git clean -fd"
     say "done"
 }
 
