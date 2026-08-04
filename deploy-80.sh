@@ -164,7 +164,7 @@ do_deploy() {
     [[ -f "$mp" ]] || { echo -n "  local manifest path: "; read -r mp; }
     [[ -z "$mp" || ! -f "$mp" ]] && { warn "not found"; return; }
     cd /Users/geojol/Documents/Projects/datacenter-kimi
-    python3 "$DEPLOY_TOOL" apply "$mp" --execute --allow-port80-downtime 2>&1
+    bash "$DEPLOY_TOOL" apply "$mp" --execute --allow-port80-downtime 2>&1
 }
 
 do_verify() {
@@ -172,7 +172,7 @@ do_verify() {
     local mp="/Users/geojol/Documents/Projects/datacenter-kimi/release-manifest/production-80/$latest/release.json"
     [[ -f "$mp" ]] || { echo -n "  manifest path: "; read -r mp; }
     cd /Users/geojol/Documents/Projects/datacenter-kimi
-    python3 "$DEPLOY_TOOL" verify "$mp" 2>&1
+    bash "$DEPLOY_TOOL" verify "$mp" 2>&1
 }
 
 do_rollback() {
@@ -183,7 +183,7 @@ do_rollback() {
     echo -n "  ${r}confirm? [y/N]${C} "; read -r REPLY
     [[ "$REPLY" =~ ^[Yy]$ ]] || { say "cancelled"; return; }
     cd /Users/geojol/Documents/Projects/datacenter-kimi
-    python3 "$DEPLOY_TOOL" rollback-code "$mp" --execute --approved-by GeojoLu 2>&1
+    bash "$DEPLOY_TOOL" rollback-code "$mp" --execute --approved-by GeojoLu 2>&1
 }
 
 do_clean() {
