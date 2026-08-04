@@ -9,9 +9,9 @@ PROD_DIR="/home/gandalf/projects/datacenter-kimi-production"
 RELEASE_ROOT="/home/gandalf/releases/datacenter-kimi"
 
 # ── mode detect ───────────────────────────────────────────────────────
-# Real terminal (user running dp80)   → full color + unicode
-# Claude Code (Bash tool / panel)     → plain ASCII, no ANSI garbage
-if [ -t 1 ] && [ -z "${CLAUDECODE:-}" ]; then
+# Plain ASCII when: CLAUDECODE set, or in tmux (right panel), or piped, or --plain
+# Full color + unicode only in a real non-tmux terminal
+if [ -t 1 ] && [ -z "${CLAUDECODE:-}" ] && [ -z "${TMUX:-}" ] && [ "${1:-}" != "--plain" ]; then
     C="\033[0m";   B="\033[1m";   d="\033[2m"
     g="\033[32m";  y="\033[33m";  r="\033[31m";  c="\033[36m"
     _ok_mark='●';  _ok_color="$g$B"
