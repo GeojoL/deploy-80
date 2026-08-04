@@ -244,5 +244,6 @@ main() {
 
 case "${1:-}" in
     status) draw; exit 0 ;;
-    *)      main ;;
+    *)     if [ -n "${CLAUDECODE:-}" ]; then draw; exit 0; fi  # Claude Code: status only
+           main ;;
 esac
