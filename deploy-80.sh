@@ -17,13 +17,13 @@ if [ -t 1 ] && [ -z "${CLAUDECODE:-}" ]; then
     _ok_mark='●';  _ok_color="$g$B"
     _dn_mark='●';  _dn_color="$r$B"
     _box_tl='┌'; _box_tr='┐'; _box_bl='└'; _box_br='┘'; _box_h='─'; _box_v='│'
-    _hint_mark='●'
+    _hint_mark='●'; _dash='—'; _dot='·'
 else
     C=""; B=""; d=""; g=""; y=""; r=""; c=""
     _ok_mark='[OK]';  _ok_color=""
     _dn_mark='[DOWN]'; _dn_color=""
     _box_tl='+'; _box_tr='+'; _box_bl='+'; _box_br='+'; _box_h='-'; _box_v='|'
-    _hint_mark='*'
+    _hint_mark='*'; _dash='--'; _dot='-'
 fi
 
 say()  { echo -e "  ${g}->${C} $*"; }
@@ -90,7 +90,7 @@ draw() {
     _box() {
         local w=52
         echo -e "  ${c}${B}${_box_tl}$(printf "%${w}s" | tr ' ' "${_box_h}")${_box_tr}${C}"
-        echo -e "  ${_box_v}              Jose · 80 Port Deploy Panel             ${_box_v}"
+        echo -e "  ${_box_v}              Jose ${_dot} 80 Port Deploy Panel             ${_box_v}"
         echo -e "  ${_box_bl}$(printf "%${w}s" | tr ' ' "${_box_h}")${_box_br}${C}"
     }
 
@@ -133,11 +133,11 @@ draw() {
     # ── hints ─────────────────────────────────────────────────────────
     local any=""
     if [[ "${git_dirty:-0}" != "0" ]]; then
-        echo -e "\n  ${y}${B}${_hint_mark}${C} ${y}repo has uncommitted changes${C} ${d}— type ${B}clean${C}${d} to restore${C}"
+        echo -e "\n  ${y}${B}${_hint_mark}${C} ${y}repo has uncommitted changes${C} ${d}${_dash} type ${B}clean${C}${d} to restore${C}"
         any=1
     fi
     if [[ "$s_diff" -gt 0 ]]; then
-        echo -e "  ${y}${B}${_hint_mark}${C} ${y}8082 ahead by ${B}${s_diff}${C} ${y}songs${C} ${d}— type ${B}promote${C}${d} to sync${C}"
+        echo -e "  ${y}${B}${_hint_mark}${C} ${y}8082 ahead by ${B}${s_diff}${C} ${y}songs${C} ${d}${_dash} type ${B}promote${C}${d} to sync${C}"
         any=1
     fi
     [[ -n "$any" ]] && echo ""
@@ -179,7 +179,7 @@ do_rollback() {
     local latest; latest=$(_ssh "ls -1t $RELEASE_ROOT/ | grep -v '^\.' | head -1")
     local mp="/Users/geojol/Documents/Projects/datacenter-kimi/release-manifest/production-80/$latest/release.json"
     [[ -f "$mp" ]] || { echo -n "  manifest path: "; read -r mp; }
-    echo -e "  ${r}${B}code/images only — DB is NOT restored${C}"
+    echo -e "  ${r}${B}code/images only ${_dash} DB is NOT restored${C}"
     echo -n "  ${r}confirm? [y/N]${C} "; read -r REPLY
     [[ "$REPLY" =~ ^[Yy]$ ]] || { say "cancelled"; return; }
     cd /Users/geojol/Documents/Projects/datacenter-kimi
