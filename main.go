@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -86,6 +88,10 @@ func truncateLine(s string, max int) string {
 // ── SSH helpers ───────────────────────────────────────────────────────────────
 
 const sshHost = "gandalf"
+
+// deployRepo is the local datacenter-kimi checkout holding the release
+// runner and prepared manifests; apply runs locally and pushes to gandalf.
+const deployRepo = "/Users/geojol/Documents/Projects/datacenter-kimi"
 
 func sshRun(cmd string) string {
 	out, _ := exec.Command("ssh", "-o", "BatchMode=yes", sshHost, cmd).Output()
@@ -198,6 +204,60 @@ LIMIT 10;" 2>/dev/null`
 	return sshRun(auditCmd)
 }
 
+// releaseManifest is the subset of release.json dp80 needs to show and apply.
+type releaseManifest struct {
+	path      string
+	releaseID string
+	commit    string
+	beVersion string
+	weVersion string
+}
+
+// findLatestManifest picks the newest prepared release under
+// release-manifest/production-80/ (IDs start with a UTC timestamp, so
+// lexicographic order is chronological).
+func findLatestManifest() (releaseManifest, error) {
+	var m releaseManifest
+	dir := deployRepo + "/release-manifest/production-80"
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return m, fmt.Errorf("read %s: %w", dir, err)
+	}
+	var ids []string
+	for _, e := range entries {
+		if e.IsDir() {
+			ids = append(ids, e.Name())
+		}
+	}
+	if len(ids) == 0 {
+		return m, fmt.Errorf("no prepared release manifest in %s", dir)
+	}
+	sort.Strings(ids)
+	id := ids[len(ids)-1]
+	m.path = dir + "/" + id + "/release.json"
+
+	data, err := os.ReadFile(m.path)
+	if err != nil {
+		return m, err
+	}
+	var j struct {
+		ReleaseID string `json:"release_id"`
+		Release   struct {
+			Commit         string `json:"commit"`
+			BackendVersion string `json:"backend_version"`
+			WebVersion     string `json:"web_version"`
+		} `json:"release"`
+	}
+	if err := json.Unmarshal(data, &j); err != nil {
+		return m, fmt.Errorf("parse %s: %w", m.path, err)
+	}
+	m.releaseID = j.ReleaseID
+	m.commit = j.Release.Commit
+	m.beVersion = j.Release.BackendVersion
+	m.weVersion = j.Release.WebVersion
+	return m, nil
+}
+
 func fetchBackendLogsClean() string {
 	// 获取 backend 日志，过滤掉 livez 噪音；如果全是 livez，显示最近的审计摘要
 	logsCmd := `docker compose -p datacenter-kimi-production logs --tail=200 backend 2>/dev/null | grep -v 'livez\|GET /api/health' | tail -30 || echo '  (最近都是健康检查日志，查看迁移历史了解最近的活动)'`
@@ -212,6 +272,8 @@ const (
 	screenBoard screen = iota
 	screenConfirmMerge
 	screenMerging
+	screenConfirmDeploy
+	screenDeploying
 	screenLog
 )
 
@@ -219,15 +281,19 @@ type model struct {
 	board       boardData
 	loading     bool
 	screen      screen
-	logContent  string // screenMerging: raw migration script output
+	logContent  string // screenMerging/screenDeploying: raw script output
 	auditText   string // screenLog: raw psql audit rows
 	backendLogs string // screenLog: raw filtered backend logs
+	manifest    releaseManifest
+	manifestErr string
 	err         string
 }
 
 type boardLoaded boardData
 type mergeStarted string
 type mergeError string
+type deployDone string
+type deployError string
 
 func loadBoard() tea.Msg {
 	d := fetchBoard()
@@ -383,12 +449,11 @@ func (m model) renderBoardContent() string {
 	rightBox := databasePaneStyle.Height(h).Render(right)
 	sb.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, leftBox, "  ", rightBox) + "\n\n")
 
-	// Command bar：只列真正接了处理逻辑的键。production-80.sh 的 apply/
-	// rollback-code 需要人工审批的 release-id、commit、镜像哈希和证据文件，
-	// 没法安全压成一次按键，所以这里不摆 d)eploy — 免得挂一个按了没反应的死键。
+	// Command bar
 	sb.WriteString(dim.Render(strings.Repeat("─", innerTextWidth)) + "\n")
 	sb.WriteString(
-		cmdKey.Render("r") + cmdDim.Render(")efresh  ") +
+		cmdKey.Render("d") + cmdDim.Render(")eploy  ") +
+			cmdKey.Render("r") + cmdDim.Render(")efresh  ") +
 			cmdKey.Render("m") + cmdDim.Render(")erge  ") +
 			cmdKey.Render("l") + cmdDim.Render(")ogs  ") +
 			cmdKey.Render("q") + cmdDim.Render(")uit"))
@@ -419,6 +484,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "r":
 				m.loading = true
 				return m, loadBoard
+			case "d":
+				mf, err := findLatestManifest()
+				m.manifest = mf
+				if err != nil {
+					m.manifestErr = err.Error()
+				} else {
+					m.manifestErr = ""
+				}
+				m.screen = screenConfirmDeploy
+				return m, nil
 			case "m":
 				m.screen = screenConfirmMerge
 				return m, nil
@@ -438,7 +513,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.screen = screenBoard
 				return m, nil
 			}
-		case screenMerging:
+		case screenConfirmDeploy:
+			switch msg.String() {
+			case "y", "Y":
+				if m.manifestErr != "" {
+					m.screen = screenBoard
+					return m, nil
+				}
+				m.screen = screenDeploying
+				m.logContent = ""
+				return m, runDeploy(m.manifest.path)
+			case "esc", "q", "n", "N", "enter":
+				m.screen = screenBoard
+				return m, nil
+			}
+		case screenMerging, screenDeploying:
 			switch msg.String() {
 			case "q", "esc", "enter":
 				m.screen = screenBoard
@@ -460,9 +549,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case mergeError:
 		m.logContent = red.Render("Error: ") + string(msg)
 		return m, nil
+
+	case deployDone:
+		m.logContent = string(msg)
+		return m, nil
+
+	case deployError:
+		m.logContent = red.Render("Deploy failed: ") + "\n" + string(msg)
+		return m, nil
 	}
 
 	return m, nil
+}
+
+// runDeploy executes the release runner's apply locally (it pushes the
+// bundle to gandalf itself). Long-running: stops/starts prod services,
+// dumps both DBs — several minutes.
+func runDeploy(manifestPath string) tea.Cmd {
+	return func() tea.Msg {
+		cmd := exec.Command("bash", "scripts/release/production-80.sh",
+			"apply", manifestPath, "--execute", "--allow-port80-downtime")
+		cmd.Dir = deployRepo
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return deployError(string(out) + "\n" + err.Error())
+		}
+		return deployDone(string(out))
+	}
 }
 
 func runMerge() tea.Msg {
@@ -540,6 +653,19 @@ func formatAuditTable(raw string) []string {
 	return out
 }
 
+// tailFramed renders the last n lines of raw script output, each clipped
+// to the frame's text width so long lines can't burst the border.
+func tailFramed(raw string, n int) string {
+	lines := strings.Split(strings.TrimRight(raw, "\n"), "\n")
+	if len(lines) > n {
+		lines = append([]string{dim.Render("… (earlier output omitted)")}, lines[len(lines)-n:]...)
+	}
+	for i, l := range lines {
+		lines[i] = truncateLine(l, innerTextWidth)
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (m model) View() string {
 	switch m.screen {
 	case screenBoard:
@@ -556,11 +682,35 @@ func (m model) View() string {
 			cmdKey.Render("[n]") + dim.Render("/Esc cancel")
 		return renderFramed(content)
 
+	case screenConfirmDeploy:
+		var sb strings.Builder
+		sb.WriteString(titleStyle.Render("Deploy release → :80") + "\n\n")
+		if m.manifestErr != "" {
+			sb.WriteString(red.Render("✗ " + truncateLine(m.manifestErr, innerTextWidth-2)) + "\n\n")
+			sb.WriteString(dim.Render("[Esc/n] back"))
+			return renderFramed(sb.String())
+		}
+		sb.WriteString(fmt.Sprintf("%-10s %s\n", "release", bold.Render(m.manifest.releaseID)))
+		sb.WriteString(fmt.Sprintf("%-10s %s\n", "commit", cyan.Render(truncateLine(m.manifest.commit, 12))))
+		sb.WriteString(fmt.Sprintf("%-10s %s\n", "backend", m.manifest.beVersion))
+		sb.WriteString(fmt.Sprintf("%-10s %s\n", "web", m.manifest.weVersion))
+		sb.WriteString("\n" + yellow.Render("Runs production-80.sh apply (brief :80 downtime).") + "\n\n")
+		sb.WriteString(cmdKey.Render("[y]") + dim.Render("es") + "\n")
+		sb.WriteString(cmdKey.Render("[n]") + dim.Render("/Esc cancel"))
+		return renderFramed(sb.String())
+
+	case screenDeploying:
+		if m.logContent == "" {
+			return renderFramed(titleStyle.Render("Deploying → :80") + "\n\n" +
+				dim.Render("running production-80.sh apply — takes several minutes…"))
+		}
+		return renderFramed(tailFramed(m.logContent, 28) + "\n\n" + dim.Render("[Enter] back"))
+
 	case screenMerging:
 		if m.logContent == "" {
 			return renderFramed(dim.Render("running migration…"))
 		}
-		return renderFramed(m.logContent + "\n\n" + dim.Render("[Enter] back"))
+		return renderFramed(tailFramed(m.logContent, 28) + "\n\n" + dim.Render("[Enter] back"))
 
 	case screenLog:
 		var sb strings.Builder
