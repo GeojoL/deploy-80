@@ -25,11 +25,28 @@ var (
 			Foreground(lipgloss.Color("6")).
 			BorderStyle(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("6")).
-			Padding(0, 1)
+			Padding(0, 1).
+			MarginLeft(2)
 
 	sectionLabel = lipgloss.NewStyle().Bold(true)
 	cmdKey       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
 	cmdDim       = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+
+	paneWidth = 38
+
+	releasesPaneStyle = lipgloss.NewStyle().
+				BorderStyle(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("6")).
+				Padding(0, 1).
+				Width(paneWidth)
+
+	databasePaneStyle = lipgloss.NewStyle().
+				BorderStyle(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("5")).
+				Padding(0, 1).
+				Width(paneWidth)
+
+	paneTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
 )
 
 // ── SSH helpers ───────────────────────────────────────────────────────────────
@@ -49,17 +66,19 @@ type containerStatus struct {
 }
 
 type boardData struct {
-	containers []containerStatus
-	livezLocal string
-	livezPub   string
-	beImage    string
-	weImage    string
-	songs80    string
-	songs82    string
-	artists80  string
-	artists82  string
-	gitHead    string
-	releases   []string
+	containers     []containerStatus
+	livezLocal     string
+	livezPub       string
+	beImage        string
+	weImage        string
+	songs80        string
+	songs82        string
+	artists80      string
+	artists82      string
+	gitHead        string
+	currentCommit  string
+	releases       []string
+	releaseCommits []string
 }
 
 func fetchBoard() boardData {
@@ -108,6 +127,9 @@ func fetchBoard() boardData {
 	}
 
 	d.gitHead = sshRun(`git -C /home/gandalf/projects/datacenter-kimi-production log --oneline -1 2>/dev/null`)
+	if parts := strings.Fields(d.gitHead); len(parts) > 0 {
+		d.currentCommit = parts[0]
+	}
 
 	rels := sshRun(`ls -1t /home/gandalf/releases/datacenter-kimi/ 2>/dev/null | grep -v '^\.' | grep -v '\.lock' | head -5`)
 	for _, r := range strings.Split(rels, "\n") {
@@ -115,8 +137,16 @@ func fetchBoard() boardData {
 			d.releases = append(d.releases, r)
 		}
 	}
+	for _, rid := range d.releases {
+		d.releaseCommits = append(d.releaseCommits, relCommit(rid))
+	}
 
 	return d
+}
+
+func relCommit(rid string) string {
+	cmd := fmt.Sprintf(`[ -f /home/gandalf/releases/datacenter-kimi/%s/release.json ] && python3 -c 'import json; m=json.load(open("/home/gandalf/releases/datacenter-kimi/%s/release.json")); print(m.get("release",{}).get("commit","?")[:8])' 2>/dev/null || echo '--'`, rid, rid)
+	return sshRun(cmd)
 }
 
 // ── model ─────────────────────────────────────────────────────────────────────
@@ -187,65 +217,101 @@ func colorDiff(a, b string) string {
 	}
 }
 
+func (m model) renderReleasesPane() string {
+	d := m.board
+	var sb strings.Builder
+	sb.WriteString(paneTitle.Render("RELEASES") + "\n")
+	sb.WriteString(dim.Render("live: ") + cyan.Render(d.currentCommit) + "\n\n")
+
+	if len(d.releases) == 0 {
+		sb.WriteString(dim.Render("(none found)") + "\n")
+	}
+
+	for i, r := range d.releases {
+		commit := "--"
+		if i < len(d.releaseCommits) {
+			commit = d.releaseCommits[i]
+		}
+		isLive := commit != "--" && d.currentCommit != "" && strings.HasPrefix(d.currentCommit, commit)
+
+		var marker, name, chash string
+		if isLive {
+			marker = green.Bold(true).Render("●")
+			name = green.Render(truncate(r, paneWidth-8))
+			chash = green.Render(commit)
+		} else {
+			marker = dim.Render("○")
+			name = dim.Render(truncate(r, paneWidth-8))
+			chash = cyan.Render(commit)
+		}
+		sb.WriteString(fmt.Sprintf("%s %s\n  %s\n", marker, name, chash))
+	}
+	return sb.String()
+}
+
+func (m model) renderDatabasePane() string {
+	d := m.board
+	var sb strings.Builder
+	sb.WriteString(paneTitle.Render("DATABASE") + "\n")
+	sb.WriteString(dim.Render(":80 production  vs  :8082 test") + "\n\n")
+
+	sb.WriteString(dim.Render(fmt.Sprintf("%-8s %7s %8s", "", ":80", ":8082")) + "\n")
+	sb.WriteString(fmt.Sprintf("%-8s %7s %8s  %s\n", "songs", bold.Render(d.songs80), d.songs82, colorDiff(d.songs80, d.songs82)))
+	sb.WriteString(fmt.Sprintf("%-8s %7s %8s  %s\n", "artists", bold.Render(d.artists80), d.artists82, colorDiff(d.artists80, d.artists82)))
+
+	sb.WriteString("\n")
+	var s80, s82 int
+	fmt.Sscan(d.songs80, &s80)
+	fmt.Sscan(d.songs82, &s82)
+	if s82 > s80 {
+		sb.WriteString(yellow.Bold(true).Render("!") + " " +
+			yellow.Render(fmt.Sprintf("8082 ahead by %d songs", s82-s80)) + "\n")
+		sb.WriteString(dim.Render("  press ") + cmdKey.Render("m") + dim.Render(" to merge") + "\n")
+	} else {
+		sb.WriteString(green.Render("✓ in sync") + "\n")
+	}
+	return sb.String()
+}
+
+func truncate(s string, n int) string {
+	if n < 1 || len(s) <= n {
+		return s
+	}
+	if n <= 1 {
+		return s[:n]
+	}
+	return s[:n-1] + "…"
+}
+
 func (m model) renderBoard() string {
 	var sb strings.Builder
 	d := m.board
 
 	sb.WriteString("\n")
-	sb.WriteString("  " + headerStyle.Render("Jose  ·  :80 Deploy Panel") + "\n")
+	sb.WriteString(headerStyle.Render("Jose  ·  :80 Deploy Panel") + "\n\n")
 
-	// Containers
-	sb.WriteString("\n  " + sectionLabel.Render("CONTAINERS") + "\n")
+	// Top strip: containers + health + images
 	cmap := map[string]string{}
 	for _, c := range d.containers {
 		cmap[c.name] = c.state
 	}
+	var strip []string
 	for _, name := range []string{"backend", "scheduler", "proxy", "db"} {
-		sb.WriteString(fmt.Sprintf("    %-12s %s\n", name, colorStatus(cmap[name])))
+		strip = append(strip, name+" "+colorStatus(cmap[name]))
 	}
+	sb.WriteString("  " + strings.Join(strip, dim.Render("  │  ")) + "\n")
+	sb.WriteString("  " + dim.Render("health") + " local " + colorHTTP(d.livezLocal) +
+		dim.Render("  │  ") + "public " + colorHTTP(d.livezPub) +
+		dim.Render("  │  ") + dim.Render("img "+d.beImage+" / "+d.weImage) + "\n\n")
 
-	// Health
-	sb.WriteString("\n  " + sectionLabel.Render("HEALTH") +
-		"    local " + colorHTTP(d.livezLocal) +
-		"   public " + colorHTTP(d.livezPub) + "\n")
-
-	// Images
-	sb.WriteString("\n  " + sectionLabel.Render("IMAGES") + "\n")
-	sb.WriteString("    " + dim.Render("backend  ") + dim.Render(d.beImage) + "\n")
-	sb.WriteString("    " + dim.Render("web      ") + dim.Render(d.weImage) + "\n")
-
-	// Data
-	sb.WriteString("\n  " + sectionLabel.Render("DATA") + "\n")
-	sb.WriteString("    " + dim.Render(fmt.Sprintf("%-10s %-10s %-10s %s", "", ":80", ":8082", "diff")) + "\n")
-	sb.WriteString(fmt.Sprintf("    %-10s %s%-10s   %-10s   %s\n",
-		"songs", "", bold.Render(d.songs80), d.songs82, colorDiff(d.songs80, d.songs82)))
-	sb.WriteString(fmt.Sprintf("    %-10s %s%-10s   %-10s   %s\n",
-		"artists", "", bold.Render(d.artists80), d.artists82, colorDiff(d.artists80, d.artists82)))
-
-	// Git
-	sb.WriteString("\n  " + sectionLabel.Render("GIT") + "       " + dim.Render(d.gitHead) + "\n")
-
-	// Releases
-	sb.WriteString("\n  " + sectionLabel.Render("RELEASES") + "\n")
-	for i, r := range d.releases {
-		sb.WriteString(fmt.Sprintf("    %s %s\n", dim.Render(fmt.Sprintf("%d)", i+1)), r))
-	}
-
-	// Hint
-	var s80, s82 int
-	fmt.Sscan(d.songs80, &s80)
-	fmt.Sscan(d.songs82, &s82)
-	if s82 > s80 {
-		sb.WriteString(fmt.Sprintf("\n  %s %s\n",
-			yellow.Bold(true).Render("!"),
-			yellow.Render(fmt.Sprintf(":8082 ahead by %s songs", bold.Render(fmt.Sprintf("%d", s82-s80)))),
-		))
-	} else {
-		sb.WriteString("\n")
-	}
+	// Two-pane row: releases | database
+	left := releasesPaneStyle.Render(m.renderReleasesPane())
+	right := databasePaneStyle.Render(m.renderDatabasePane())
+	row := lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right)
+	sb.WriteString(lipgloss.NewStyle().MarginLeft(2).Render(row) + "\n")
 
 	// Command bar
-	sb.WriteString("  " + dim.Render(strings.Repeat("─", 54)) + "\n")
+	sb.WriteString("\n  " + dim.Render(strings.Repeat("─", 2*paneWidth+10)) + "\n")
 	sb.WriteString("  " +
 		cmdKey.Render("d") + cmdDim.Render(")eploy   ") +
 		cmdKey.Render("r") + cmdDim.Render(")ollback   ") +
@@ -378,9 +444,8 @@ func (m model) View() string {
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "status" {
 		d := fetchBoard()
-		// plain status output for non-interactive use
-		fmt.Println("songs :80 =", d.songs80, "  :8082 =", d.songs82)
-		fmt.Println("livez local =", d.livezLocal, "  public =", d.livezPub)
+		m := model{board: d}
+		fmt.Println(m.renderBoard())
 		return
 	}
 
