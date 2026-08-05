@@ -1,0 +1,392 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+)
+
+// ── styles ────────────────────────────────────────────────────────────────────
+
+var (
+	cyan   = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
+	bold   = lipgloss.NewStyle().Bold(true)
+	dim    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	green  = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+	yellow = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+	red    = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+
+	headerStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("6")).
+			BorderStyle(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("6")).
+			Padding(0, 1)
+
+	sectionLabel = lipgloss.NewStyle().Bold(true)
+	cmdKey       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	cmdDim       = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+)
+
+// ── SSH helpers ───────────────────────────────────────────────────────────────
+
+const sshHost = "gandalf"
+
+func sshRun(cmd string) string {
+	out, _ := exec.Command("ssh", "-o", "BatchMode=yes", sshHost, cmd).Output()
+	return strings.TrimSpace(string(out))
+}
+
+// ── data model ────────────────────────────────────────────────────────────────
+
+type containerStatus struct {
+	name  string
+	state string
+}
+
+type boardData struct {
+	containers []containerStatus
+	livezLocal string
+	livezPub   string
+	beImage    string
+	weImage    string
+	songs80    string
+	songs82    string
+	artists80  string
+	artists82  string
+	gitHead    string
+	releases   []string
+}
+
+func fetchBoard() boardData {
+	var d boardData
+
+	raw := sshRun(`docker compose -p datacenter-kimi-production ps --format '{{.Service}} {{.State}} {{.Status}}' 2>/dev/null`)
+	for _, line := range strings.Split(raw, "\n") {
+		parts := strings.SplitN(line, " ", 2)
+		if len(parts) == 2 {
+			d.containers = append(d.containers, containerStatus{parts[0], parts[1]})
+		}
+	}
+
+	d.livezLocal = sshRun(`curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1/api/livez 2>/dev/null`)
+	d.livezPub = strings.TrimSpace(func() string {
+		out, _ := exec.Command("curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+			"https://gandalf.zebra-diminished.ts.net/api/livez").Output()
+		return string(out)
+	}())
+
+	envRaw := sshRun(`cat /home/gandalf/projects/datacenter-kimi-production/release.env 2>/dev/null`)
+	for _, l := range strings.Split(envRaw, "\n") {
+		if strings.Contains(l, "BACKEND") {
+			parts := strings.SplitN(l, "=", 2)
+			if len(parts) == 2 && len(parts[1]) > 7 {
+				d.beImage = parts[1][7:19]
+			}
+		}
+		if strings.Contains(l, "WEB") {
+			parts := strings.SplitN(l, "=", 2)
+			if len(parts) == 2 && len(parts[1]) > 7 {
+				d.weImage = parts[1][7:19]
+			}
+		}
+	}
+
+	data80 := strings.Split(sshRun(`docker exec datacenter-kimi-production-db-1 psql -U datacenter -d datacenter_kimi_production -tAc 'SELECT count(*) FROM songs; SELECT count(*) FROM artists;' 2>/dev/null`), "\n")
+	data82 := strings.Split(sshRun(`docker exec datacenter-kimi-db-1 psql -U datacenter -d datacenter_kimi_test -tAc 'SELECT count(*) FROM songs; SELECT count(*) FROM artists;' 2>/dev/null`), "\n")
+	if len(data80) >= 2 {
+		d.songs80 = strings.TrimSpace(data80[0])
+		d.artists80 = strings.TrimSpace(data80[1])
+	}
+	if len(data82) >= 2 {
+		d.songs82 = strings.TrimSpace(data82[0])
+		d.artists82 = strings.TrimSpace(data82[1])
+	}
+
+	d.gitHead = sshRun(`git -C /home/gandalf/projects/datacenter-kimi-production log --oneline -1 2>/dev/null`)
+
+	rels := sshRun(`ls -1t /home/gandalf/releases/datacenter-kimi/ 2>/dev/null | grep -v '^\.' | grep -v '\.lock' | head -5`)
+	for _, r := range strings.Split(rels, "\n") {
+		if r != "" {
+			d.releases = append(d.releases, r)
+		}
+	}
+
+	return d
+}
+
+// ── model ─────────────────────────────────────────────────────────────────────
+
+type screen int
+
+const (
+	screenBoard screen = iota
+	screenConfirmMerge
+	screenMerging
+	screenLog
+)
+
+type model struct {
+	board      boardData
+	loading    bool
+	screen     screen
+	logContent string
+	err        string
+}
+
+type boardLoaded boardData
+type mergeStarted string
+type mergeError string
+
+func loadBoard() tea.Msg {
+	d := fetchBoard()
+	return boardLoaded(d)
+}
+
+// ── render helpers ────────────────────────────────────────────────────────────
+
+func colorStatus(state string) string {
+	switch {
+	case strings.Contains(state, "healthy"):
+		return green.Bold(true).Render("● ") + green.Render(state)
+	case strings.Contains(state, "Up"):
+		return green.Render("● " + state)
+	case state == "":
+		return dim.Render("--")
+	default:
+		return red.Bold(true).Render("● ") + red.Render(state)
+	}
+}
+
+func colorHTTP(code string) string {
+	if code == "200" {
+		return bold.Foreground(lipgloss.Color("2")).Render(code)
+	}
+	if code == "" {
+		return dim.Render("?")
+	}
+	return bold.Foreground(lipgloss.Color("1")).Render(code)
+}
+
+func colorDiff(a, b string) string {
+	var ai, bi int
+	fmt.Sscan(a, &ai)
+	fmt.Sscan(b, &bi)
+	d := bi - ai
+	switch {
+	case d > 0:
+		return yellow.Bold(true).Render(fmt.Sprintf("+%d", d))
+	case d < 0:
+		return red.Bold(true).Render(fmt.Sprintf("%d", d))
+	default:
+		return dim.Render("0")
+	}
+}
+
+func (m model) renderBoard() string {
+	var sb strings.Builder
+	d := m.board
+
+	sb.WriteString("\n")
+	sb.WriteString("  " + headerStyle.Render("Jose  ·  :80 Deploy Panel") + "\n")
+
+	// Containers
+	sb.WriteString("\n  " + sectionLabel.Render("CONTAINERS") + "\n")
+	cmap := map[string]string{}
+	for _, c := range d.containers {
+		cmap[c.name] = c.state
+	}
+	for _, name := range []string{"backend", "scheduler", "proxy", "db"} {
+		sb.WriteString(fmt.Sprintf("    %-12s %s\n", name, colorStatus(cmap[name])))
+	}
+
+	// Health
+	sb.WriteString("\n  " + sectionLabel.Render("HEALTH") +
+		"    local " + colorHTTP(d.livezLocal) +
+		"   public " + colorHTTP(d.livezPub) + "\n")
+
+	// Images
+	sb.WriteString("\n  " + sectionLabel.Render("IMAGES") + "\n")
+	sb.WriteString("    " + dim.Render("backend  ") + dim.Render(d.beImage) + "\n")
+	sb.WriteString("    " + dim.Render("web      ") + dim.Render(d.weImage) + "\n")
+
+	// Data
+	sb.WriteString("\n  " + sectionLabel.Render("DATA") + "\n")
+	sb.WriteString("    " + dim.Render(fmt.Sprintf("%-10s %-10s %-10s %s", "", ":80", ":8082", "diff")) + "\n")
+	sb.WriteString(fmt.Sprintf("    %-10s %s%-10s   %-10s   %s\n",
+		"songs", "", bold.Render(d.songs80), d.songs82, colorDiff(d.songs80, d.songs82)))
+	sb.WriteString(fmt.Sprintf("    %-10s %s%-10s   %-10s   %s\n",
+		"artists", "", bold.Render(d.artists80), d.artists82, colorDiff(d.artists80, d.artists82)))
+
+	// Git
+	sb.WriteString("\n  " + sectionLabel.Render("GIT") + "       " + dim.Render(d.gitHead) + "\n")
+
+	// Releases
+	sb.WriteString("\n  " + sectionLabel.Render("RELEASES") + "\n")
+	for i, r := range d.releases {
+		sb.WriteString(fmt.Sprintf("    %s %s\n", dim.Render(fmt.Sprintf("%d)", i+1)), r))
+	}
+
+	// Hint
+	var s80, s82 int
+	fmt.Sscan(d.songs80, &s80)
+	fmt.Sscan(d.songs82, &s82)
+	if s82 > s80 {
+		sb.WriteString(fmt.Sprintf("\n  %s %s\n",
+			yellow.Bold(true).Render("!"),
+			yellow.Render(fmt.Sprintf(":8082 ahead by %s songs", bold.Render(fmt.Sprintf("%d", s82-s80)))),
+		))
+	} else {
+		sb.WriteString("\n")
+	}
+
+	// Command bar
+	sb.WriteString("  " + dim.Render(strings.Repeat("─", 54)) + "\n")
+	sb.WriteString("  " +
+		cmdKey.Render("d") + cmdDim.Render(")eploy   ") +
+		cmdKey.Render("r") + cmdDim.Render(")ollback   ") +
+		cmdKey.Render("m") + cmdDim.Render(")erge   ") +
+		cmdKey.Render("l") + cmdDim.Render(")ogs   ") +
+		cmdKey.Render("q") + cmdDim.Render(")uit") +
+		"\n\n")
+
+	return sb.String()
+}
+
+// ── init / update / view ──────────────────────────────────────────────────────
+
+func (m model) Init() tea.Cmd {
+	return tea.Batch(tea.ClearScrollArea, loadBoard)
+}
+
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+
+	case boardLoaded:
+		m.board = boardData(msg)
+		m.loading = false
+		return m, nil
+
+	case tea.KeyMsg:
+		switch m.screen {
+		case screenBoard:
+			switch msg.String() {
+			case "q", "ctrl+c":
+				return m, tea.Quit
+			case "r":
+				m.loading = true
+				return m, loadBoard
+			case "m":
+				m.screen = screenConfirmMerge
+				return m, nil
+			case "l":
+				m.screen = screenLog
+				m.logContent = sshRun(`docker compose -p datacenter-kimi-production logs --tail=60 backend 2>/dev/null`)
+				return m, nil
+			}
+		case screenConfirmMerge:
+			switch msg.String() {
+			case "y", "Y":
+				m.screen = screenMerging
+				m.logContent = ""
+				return m, runMerge
+			case "esc", "q", "n", "N", "enter":
+				m.screen = screenBoard
+				return m, nil
+			}
+		case screenMerging:
+			switch msg.String() {
+			case "q", "esc", "enter":
+				m.screen = screenBoard
+				m.loading = true
+				return m, loadBoard
+			}
+		case screenLog:
+			switch msg.String() {
+			case "q", "esc", "enter":
+				m.screen = screenBoard
+				return m, nil
+			}
+		}
+
+	case mergeStarted:
+		m.logContent = string(msg)
+		return m, nil
+
+	case mergeError:
+		m.logContent = red.Render("Error: ") + string(msg)
+		return m, nil
+	}
+
+	return m, nil
+}
+
+func runMerge() tea.Msg {
+	scriptDir, _ := os.Executable()
+	// find migrate-songs.sh next to the binary
+	scriptPath := strings.TrimSuffix(scriptDir, "/dp80") + "/migrate-songs.sh"
+	if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
+		// fallback: same dir as binary
+		scriptPath = "migrate-songs.sh"
+	}
+
+	// scp then run
+	exec.Command("scp", "-q", scriptPath, sshHost+":/tmp/migrate-songs.sh").Run()
+	out, err := exec.Command("ssh", "-o", "BatchMode=yes",
+		"-o", "ServerAliveInterval=30",
+		"-o", "ServerAliveCountMax=120",
+		sshHost, "bash /tmp/migrate-songs.sh").CombinedOutput()
+	if err != nil {
+		return mergeError(string(out) + "\n" + err.Error())
+	}
+	return mergeStarted(string(out))
+}
+
+func (m model) View() string {
+	switch m.screen {
+	case screenBoard:
+		if m.loading {
+			return "\n  " + dim.Render("loading…") + "\n"
+		}
+		return m.renderBoard()
+
+	case screenConfirmMerge:
+		return "\n" +
+			"  " + bold.Render("Merge :8082 business data → :80") + "\n\n" +
+			"  " + yellow.Render("This will INSERT new songs into production. Continue?") + "\n\n" +
+			"  " + cmdKey.Render("[y]") + dim.Render("es   ") +
+			cmdKey.Render("[n]") + dim.Render("/Esc cancel") + "\n\n"
+
+	case screenMerging:
+		if m.logContent == "" {
+			return "\n  " + dim.Render("running migration…") + "\n"
+		}
+		return "\n" + m.logContent + "\n\n  " + dim.Render("[Enter] back") + "\n"
+
+	case screenLog:
+		return "\n" + m.logContent + "\n\n  " + dim.Render("[Esc/q] back") + "\n"
+	}
+	return ""
+}
+
+// ── entry point ───────────────────────────────────────────────────────────────
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "status" {
+		d := fetchBoard()
+		// plain status output for non-interactive use
+		fmt.Println("songs :80 =", d.songs80, "  :8082 =", d.songs82)
+		fmt.Println("livez local =", d.livezLocal, "  public =", d.livezPub)
+		return
+	}
+
+	p := tea.NewProgram(model{loading: true}, tea.WithAltScreen())
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
