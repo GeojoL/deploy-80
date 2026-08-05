@@ -165,8 +165,8 @@ LIMIT 10;" 2>/dev/null`
 }
 
 func fetchBackendLogsClean() string {
-	// 获取 backend 日志，过滤掉 livez 噪音
-	logsCmd := `docker compose -p datacenter-kimi-production logs --tail=80 backend 2>/dev/null | grep -v 'livez\|GET /api/health' | head -50`
+	// 获取 backend 日志，过滤掉 livez 噪音；如果全是 livez，显示最近的审计摘要
+	logsCmd := `docker compose -p datacenter-kimi-production logs --tail=200 backend 2>/dev/null | grep -v 'livez\|GET /api/health' | tail -30 || echo '  (最近都是健康检查日志，查看迁移历史了解最近的活动)'`
 	return sshRun(logsCmd)
 }
 
