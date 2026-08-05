@@ -242,10 +242,11 @@ func (m model) renderReleasesPane() string {
 	d := m.board
 	var sb strings.Builder
 	sb.WriteString(paneTitle.Render("RELEASES") + "\n")
-	sb.WriteString(dim.Render("live: ") + cyan.Render(d.currentCommit) + "\n\n")
+	sb.WriteString(dim.Render("live: ") + green.Render(d.currentCommit) + "\n")
 
 	if len(d.releases) == 0 {
-		sb.WriteString(dim.Render("(none found)") + "\n")
+		sb.WriteString(dim.Render("(none)") + "\n")
+		return sb.String()
 	}
 
 	for i, r := range d.releases {
@@ -255,17 +256,23 @@ func (m model) renderReleasesPane() string {
 		}
 		isLive := commit != "--" && d.currentCommit != "" && strings.HasPrefix(d.currentCommit, commit)
 
-		var marker, name, chash string
+		// 提取时间戳：20260803T074303Z → "08-03"
+		var timeStr string
+		if len(r) >= 8 {
+			timeStr = r[4:6] + "-" + r[6:8]
+		} else {
+			timeStr = r
+		}
+
+		var marker, status string
 		if isLive {
 			marker = green.Bold(true).Render("●")
-			name = green.Render(truncate(r, paneWidth-8))
-			chash = green.Render(commit)
+			status = green.Render(fmt.Sprintf("%s %s (live)", commit, timeStr))
 		} else {
 			marker = dim.Render("○")
-			name = dim.Render(truncate(r, paneWidth-8))
-			chash = cyan.Render(commit)
+			status = dim.Render(fmt.Sprintf("%s %s", commit, timeStr))
 		}
-		sb.WriteString(fmt.Sprintf("%s %s\n  %s\n", marker, name, chash))
+		sb.WriteString(fmt.Sprintf("%s %s\n", marker, status))
 	}
 	return sb.String()
 }
@@ -274,22 +281,34 @@ func (m model) renderDatabasePane() string {
 	d := m.board
 	var sb strings.Builder
 	sb.WriteString(paneTitle.Render("DATABASE") + "\n")
-	sb.WriteString(dim.Render(":80 production  vs  :8082 test") + "\n\n")
+	sb.WriteString(dim.Render("prod :80  vs  test :8082") + "\n")
 
-	sb.WriteString(dim.Render(fmt.Sprintf("%-8s %7s %8s", "", ":80", ":8082")) + "\n")
-	sb.WriteString(fmt.Sprintf("%-8s %7s %8s  %s\n", "songs", bold.Render(d.songs80), d.songs82, colorDiff(d.songs80, d.songs82)))
-	sb.WriteString(fmt.Sprintf("%-8s %7s %8s  %s\n", "artists", bold.Render(d.artists80), d.artists82, colorDiff(d.artists80, d.artists82)))
+	// 对齐的表格：固定宽度列
+	sb.WriteString(dim.Render(""))  // space for alignment
+	sb.WriteString(fmt.Sprintf("%8s %8s   %s\n", ":80", ":8082", "diff"))
+	sb.WriteString(fmt.Sprintf("%-7s %8s %8s   %s\n",
+		"songs",
+		bold.Render(d.songs80),
+		d.songs82,
+		colorDiff(d.songs80, d.songs82)))
+	sb.WriteString(fmt.Sprintf("%-7s %8s %8s   %s\n",
+		"artists",
+		bold.Render(d.artists80),
+		d.artists82,
+		colorDiff(d.artists80, d.artists82)))
 
 	sb.WriteString("\n")
 	var s80, s82 int
 	fmt.Sscan(d.songs80, &s80)
 	fmt.Sscan(d.songs82, &s82)
 	if s82 > s80 {
-		sb.WriteString(yellow.Bold(true).Render("!") + " " +
-			yellow.Render(fmt.Sprintf("8082 ahead by %d songs", s82-s80)) + "\n")
-		sb.WriteString(dim.Render("  press ") + cmdKey.Render("m") + dim.Render(" to merge") + "\n")
+		sb.WriteString(yellow.Bold(true).Render("⚠ ") +
+			yellow.Render(fmt.Sprintf("%d songs new", s82-s80)) + "\n" +
+			dim.Render("  press m to merge") + "\n")
+	} else if s82 == s80 {
+		sb.WriteString(green.Render("✓ synced") + "\n")
 	} else {
-		sb.WriteString(green.Render("✓ in sync") + "\n")
+		sb.WriteString(red.Render("✗ 80 ahead") + "\n")
 	}
 	return sb.String()
 }
@@ -311,19 +330,29 @@ func (m model) renderBoard() string {
 	sb.WriteString("\n")
 	sb.WriteString(headerStyle.Render("Jose  ·  :80 Deploy Panel") + "\n\n")
 
-	// Top strip: containers + health + images
+	// Top strip: container status (compact)
 	cmap := map[string]string{}
 	for _, c := range d.containers {
 		cmap[c.name] = c.state
 	}
-	var strip []string
+	// 简洁格式：backend● scheduler● proxy● db●
+	var statuses []string
 	for _, name := range []string{"backend", "scheduler", "proxy", "db"} {
-		strip = append(strip, name+" "+colorStatus(cmap[name]))
+		st := cmap[name]
+		var icon string
+		if strings.Contains(st, "healthy") || strings.Contains(st, "Up") {
+			icon = green.Render("●")
+		} else {
+			icon = red.Render("●")
+		}
+		statuses = append(statuses, name+icon)
 	}
-	sb.WriteString("  " + strings.Join(strip, dim.Render("  │  ")) + "\n")
-	sb.WriteString("  " + dim.Render("health") + " local " + colorHTTP(d.livezLocal) +
-		dim.Render("  │  ") + "public " + colorHTTP(d.livezPub) +
-		dim.Render("  │  ") + dim.Render("img "+d.beImage+" / "+d.weImage) + "\n\n")
+	sb.WriteString("  " + dim.Render("containers: ") + strings.Join(statuses, " ") + "\n")
+
+	// Health checks + images (second line)
+	sb.WriteString("  " + dim.Render("livez: ") + "local " + colorHTTP(d.livezLocal) + " • " +
+		"public " + colorHTTP(d.livezPub) +
+		dim.Render(" • ") + dim.Render("be:"+d.beImage+" we:"+d.weImage) + "\n\n")
 
 	// Two-pane row: releases | database
 	left := releasesPaneStyle.Render(m.renderReleasesPane())
@@ -331,13 +360,13 @@ func (m model) renderBoard() string {
 	row := lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right)
 	sb.WriteString(lipgloss.NewStyle().MarginLeft(2).Render(row) + "\n")
 
-	// Command bar
+	// Command bar (simplified)
 	sb.WriteString("\n  " + dim.Render(strings.Repeat("─", 2*paneWidth+10)) + "\n")
 	sb.WriteString("  " +
-		cmdKey.Render("d") + cmdDim.Render(")eploy   ") +
-		cmdKey.Render("r") + cmdDim.Render(")ollback   ") +
-		cmdKey.Render("m") + cmdDim.Render(")erge   ") +
-		cmdKey.Render("l") + cmdDim.Render(")ogs   ") +
+		cmdKey.Render("d") + cmdDim.Render(")eploy  ") +
+		cmdKey.Render("r") + cmdDim.Render(")ollback  ") +
+		cmdKey.Render("m") + cmdDim.Render(")erge  ") +
+		cmdKey.Render("l") + cmdDim.Render(")ogs  ") +
 		cmdKey.Render("q") + cmdDim.Render(")uit") +
 		"\n\n")
 
@@ -458,46 +487,49 @@ func (m model) View() string {
 
 	case screenLog:
 		var sb strings.Builder
-		sb.WriteString("\n")
+		sb.WriteString("\n  " + green.Render("📋 迁移历史") + "\n")
 
 		// 分离审计和日志部分
 		parts := strings.Split(m.logContent, "=== 后端日志")
 
-		// 审计部分（带框）
+		// 审计部分：简单显示
 		if len(parts) > 0 {
 			auditPart := strings.TrimPrefix(parts[0], "=== 迁移审计历史 ===\n")
 			auditLines := strings.Split(strings.TrimSpace(auditPart), "\n")
-			auditBox := lipgloss.NewStyle().
-				BorderStyle(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("2")).
-				Padding(0, 1).
-				Render(strings.Join(auditLines, "\n"))
-			sb.WriteString(green.Render("📋 迁移历史\n"))
-			sb.WriteString(lipgloss.NewStyle().MarginLeft(2).Render(auditBox))
-			sb.WriteString("\n\n")
+
+			displayLines := auditLines
+			if len(displayLines) == 0 || displayLines[0] == "" {
+				displayLines = []string{dim.Render("(无迁移记录)")}
+			} else if len(displayLines) > 8 {
+				displayLines = displayLines[:8]
+				displayLines = append(displayLines, dim.Render("..."))
+			}
+
+			for _, line := range displayLines {
+				sb.WriteString("  " + line + "\n")
+			}
 		}
 
-		// 日志部分（带框）
+		sb.WriteString("\n  " + cyan.Render("🔍 日志") + "\n")
+
+		// 日志部分：简单显示
 		if len(parts) > 1 {
 			logPart := strings.TrimPrefix(parts[1], " ===\n")
 			logLines := strings.Split(strings.TrimSpace(logPart), "\n")
-			// 截断过长的行
-			var truncatedLines []string
-			for _, line := range logLines {
-				if len(line) > 100 {
-					truncatedLines = append(truncatedLines, line[:97]+"...")
-				} else {
-					truncatedLines = append(truncatedLines, line)
-				}
+
+			displayLines := logLines
+			if len(displayLines) > 12 {
+				displayLines = displayLines[:12]
+				displayLines = append(displayLines, dim.Render("..."))
 			}
-			logBox := lipgloss.NewStyle().
-				BorderStyle(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("6")).
-				Padding(0, 1).
-				Render(strings.Join(truncatedLines, "\n"))
-			sb.WriteString(cyan.Render("🔍 日志（已过滤 livez 噪音）\n"))
-			sb.WriteString(lipgloss.NewStyle().MarginLeft(2).Render(logBox))
-			sb.WriteString("\n")
+
+			for _, line := range displayLines {
+				// 截断过长行
+				if len(line) > 80 {
+					line = line[:77] + "..."
+				}
+				sb.WriteString("  " + line + "\n")
+			}
 		}
 
 		sb.WriteString("\n  " + dim.Render("[Esc/q] back") + "\n")
