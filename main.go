@@ -149,6 +149,27 @@ func relCommit(rid string) string {
 	return sshRun(cmd)
 }
 
+func fetchAuditLog() string {
+	// 获取迁移审计历史
+	auditCmd := `docker exec datacenter-kimi-production-db-1 psql -U datacenter -d datacenter_kimi_production -tAc "
+SELECT
+  promotion_id,
+  TO_CHAR(started_at, 'MM-DD HH:MI:SS') as time,
+  songs_inserted,
+  status
+FROM data_promotion_runs
+WHERE promotion_id LIKE 'migrate-%'
+ORDER BY started_at DESC
+LIMIT 10;" 2>/dev/null`
+	return sshRun(auditCmd)
+}
+
+func fetchBackendLogsClean() string {
+	// 获取 backend 日志，过滤掉 livez 噪音
+	logsCmd := `docker compose -p datacenter-kimi-production logs --tail=80 backend 2>/dev/null | grep -v 'livez\|GET /api/health' | head -50`
+	return sshRun(logsCmd)
+}
+
 // ── model ─────────────────────────────────────────────────────────────────────
 
 type screen int
@@ -351,7 +372,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case "l":
 				m.screen = screenLog
-				m.logContent = sshRun(`docker compose -p datacenter-kimi-production logs --tail=60 backend 2>/dev/null`)
+				audit := fetchAuditLog()
+				logs := fetchBackendLogsClean()
+				m.logContent = fmt.Sprintf("=== 迁移审计历史 ===\n%s\n\n=== 后端日志（已过滤噪音）===\n%s", audit, logs)
 				return m, nil
 			}
 		case screenConfirmMerge:
@@ -434,7 +457,22 @@ func (m model) View() string {
 		return "\n" + m.logContent + "\n\n  " + dim.Render("[Enter] back") + "\n"
 
 	case screenLog:
-		return "\n" + m.logContent + "\n\n  " + dim.Render("[Esc/q] back") + "\n"
+		var sb strings.Builder
+		sb.WriteString("\n")
+		// 分离审计和日志部分，分别着色
+		parts := strings.Split(m.logContent, "=== 后端日志")
+		if len(parts) > 0 {
+			// 审计部分（绿色）
+			auditPart := strings.TrimPrefix(parts[0], "=== 迁移审计历史 ===\n")
+			sb.WriteString(green.Render("📋 迁移历史\n") + dim.Render(strings.TrimSpace(auditPart)) + "\n\n")
+		}
+		if len(parts) > 1 {
+			// 日志部分（默认色）
+			logPart := strings.TrimPrefix(parts[1], " ===\n")
+			sb.WriteString(cyan.Render("🔍 日志（已过滤 livez 噪音）\n") + strings.TrimSpace(logPart) + "\n")
+		}
+		sb.WriteString("\n  " + dim.Render("[Esc/q] back") + "\n")
+		return sb.String()
 	}
 	return ""
 }
