@@ -211,34 +211,68 @@ type releaseManifest struct {
 	commit    string
 	beVersion string
 	weVersion string
+	fromLocal bool // true = kenPro, false = pulled from gandalf
 }
 
-// findLatestManifest picks the newest prepared release under
-// release-manifest/production-80/ (IDs start with a UTC timestamp, so
-// lexicographic order is chronological).
+// manifestDir is the fixed path under a datacenter-kimi checkout where
+// production-80.sh prepare writes its output — same relative path on
+// kenPro and on gandalf.
+const manifestRelDir = "release-manifest/production-80"
+
+// findLatestManifest searches for prepared release manifests in two
+// places, newest first (IDs are UTC-timestamps, so lexicographic =
+// chronological):
+//   1. gandalf (ssh ls) — ruby may have prepared there
+//   2. kenPro local — ruby may have prepared on this machine
+// If the newest manifest is only on gandalf it is scp'd to a local
+// cache under os.TempDir() so apply can read it from disk.
 func findLatestManifest() (releaseManifest, error) {
 	var m releaseManifest
-	dir := deployRepo + "/release-manifest/production-80"
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return m, fmt.Errorf("read %s: %w", dir, err)
+
+	type candidate struct {
+		id     string
+		dir    string // full path to the release directory
+		local  bool   // already on kenPro?
 	}
-	var ids []string
-	for _, e := range entries {
-		if e.IsDir() {
-			ids = append(ids, e.Name())
+	var candidates []candidate
+
+	// ── gandalf ──
+	remoteDir := "/home/gandalf/projects/datacenter-kimi/" + manifestRelDir
+	if ids := strings.Fields(sshRun("ls -1t " + remoteDir + " 2>/dev/null")); len(ids) > 0 {
+		for _, id := range ids {
+			candidates = append(candidates, candidate{id: id, dir: remoteDir + "/" + id, local: false})
 		}
 	}
-	if len(ids) == 0 {
-		return m, fmt.Errorf("no prepared release manifest in %s", dir)
-	}
-	sort.Strings(ids)
-	id := ids[len(ids)-1]
-	m.path = dir + "/" + id + "/release.json"
 
+	// ── kenPro local ──
+	localRoot := deployRepo + "/" + manifestRelDir
+	if entries, err := os.ReadDir(localRoot); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				candidates = append(candidates, candidate{id: e.Name(), dir: localRoot + "/" + e.Name(), local: true})
+			}
+		}
+	}
+
+	if len(candidates) == 0 {
+		return m, fmt.Errorf("no prepared release manifest found (gandalf or local)")
+	}
+
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].id > candidates[j].id })
+	best := candidates[0]
+
+	if !best.local {
+		// pull from gandalf so the file is on disk for apply
+		cacheDir := os.TempDir() + "/dp80-manifests/" + best.id
+		os.MkdirAll(cacheDir, 0700)
+		exec.Command("scp", "-qr", sshHost+":"+best.dir+"/", cacheDir).Run()
+		best.dir = cacheDir
+	}
+
+	m.path = best.dir + "/release.json"
 	data, err := os.ReadFile(m.path)
 	if err != nil {
-		return m, err
+		return m, fmt.Errorf("read manifest %s: %w", m.path, err)
 	}
 	var j struct {
 		ReleaseID string `json:"release_id"`
@@ -255,6 +289,7 @@ func findLatestManifest() (releaseManifest, error) {
 	m.commit = j.Release.Commit
 	m.beVersion = j.Release.BackendVersion
 	m.weVersion = j.Release.WebVersion
+	m.fromLocal = best.local
 	return m, nil
 }
 
@@ -562,14 +597,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// runDeploy executes the release runner's apply locally (it pushes the
-// bundle to gandalf itself). Long-running: stops/starts prod services,
-// dumps both DBs — several minutes.
+// runDeploy executes the release runner. If the manifest directory
+// contains its own production_80.py (it always does after prepare),
+// that exact runner is used — so the byte-length check matches
+// regardless of what's in the local datacenter-kimi checkout.
+// Falls back to the local repo's scripts/release/production-80.sh only
+// if the runner isn't bundled with the manifest.
 func runDeploy(manifestPath string) tea.Cmd {
 	return func() tea.Msg {
-		cmd := exec.Command("bash", "scripts/release/production-80.sh",
-			"apply", manifestPath, "--execute", "--allow-port80-downtime")
-		cmd.Dir = deployRepo
+		manifestDir := strings.TrimSuffix(manifestPath, "/release.json")
+		runner := manifestDir + "/production_80.py"
+		var cmd *exec.Cmd
+		if _, err := os.Stat(runner); err == nil {
+			cmd = exec.Command("python3", runner,
+				"apply", manifestPath, "--execute", "--allow-port80-downtime")
+		} else {
+			cmd = exec.Command("bash", "scripts/release/production-80.sh",
+				"apply", manifestPath, "--execute", "--allow-port80-downtime")
+			cmd.Dir = deployRepo
+		}
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			return deployError(string(out) + "\n" + err.Error())
@@ -707,6 +753,11 @@ func (m model) View() string {
 		sb.WriteString(fmt.Sprintf("%-10s %s\n", "commit", cyan.Render(truncateLine(m.manifest.commit, 12))))
 		sb.WriteString(fmt.Sprintf("%-10s %s\n", "backend", m.manifest.beVersion))
 		sb.WriteString(fmt.Sprintf("%-10s %s\n", "web", m.manifest.weVersion))
+		src := "gandalf"
+		if m.manifest.fromLocal {
+			src = "kenPro"
+		}
+		sb.WriteString(dim.Render(fmt.Sprintf("manifest: pulled from %s", src)) + "\n")
 		sb.WriteString("\n" + yellow.Render("Runs production-80.sh apply (brief :80 downtime).") + "\n\n")
 		sb.WriteString(cmdKey.Render("[y]") + dim.Render("es") + "\n")
 		sb.WriteString(cmdKey.Render("[n]") + dim.Render("/Esc cancel"))
