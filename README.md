@@ -1,6 +1,6 @@
 # dp80 — :80 Deploy Panel
 
-Jose 的 Gandalf 80 端口部署面板。
+Jose 的 Gandalf 80 端口部署面板。Go + bubbletea TUI，源码即本目录。
 
 ## 用法
 
@@ -8,6 +8,8 @@ Jose 的 Gandalf 80 端口部署面板。
 dp80          # 交互面板
 dp80 status   # 只读状态（非交互）
 ```
+
+alias `dp80` 定义在 `~/.my_script/grabalias.sh`（不在本项目里，全局 alias 统一放那），指向本目录编译出的 `dp80` 二进制。**高频命令**，搬迁本项目目录时务必同步改这个 alias。
 
 ## 命令
 
@@ -21,14 +23,12 @@ dp80 status   # 只读状态（非交互）
 
 ## 面板内容
 
-- CONTAINERS — 4 个容器健康状态（healthy=绿，down=红）
-- HEALTH — local / public livez 响应码（200=绿，其他=红）
-- IMAGES — 当前运行的 backend / web image digest 前缀
-- DATA — :80 vs :8082 歌曲/艺人数量对比，diff 黄色高亮
-- GIT — 生产 repo HEAD
-- RELEASES — 最近 5 个 release，有 manifest 的显示 commit hash
+顶部条：容器健康（healthy=绿）、local/public livez（200=绿）、当前 backend/web image。
 
-差异提示：:8082 歌曲多于 :80 时底部自动出现 `merge` 提示。
+左右两栏，各自标出差异：
+
+- **RELEASES**（左）— 最近 5 个 release，`live:` 显示生产当前 commit；匹配上的绿色 `●`，没匹配的灰色 `○`——不匹配说明生产跑的版本不在这 5 条 release 记录里
+- **DATABASE**（右）— :80 vs :8082 歌曲/艺人数量对比，diff 高亮；:8082 领先时提示按 `m` 合并
 
 ## 职责边界
 
