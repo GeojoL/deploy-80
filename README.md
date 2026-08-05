@@ -15,17 +15,16 @@ alias `dp80` 定义在 `~/.my_script/grabalias.sh`（不在本项目里，全局
 
 | 键 | 操作 |
 |---|---|
+| `d` | 一键部署：取最新已 `prepare` 的 release manifest，确认后本地跑 `production-80.sh apply --execute --allow-port80-downtime`（按键即授权，无额外闸） |
 | `r` | 刷新面板（重新拉取容器状态/健康检查/release/DB 计数） |
 | `m` | 把 :8082 业务数据并入 :80（需二次确认） |
 | `l` | 查看迁移审计历史 + 容器日志（backend，已过滤 livez 噪音） |
 | `q` | 退出 |
 
-**没有 `d)eploy`**：`scripts/release/production-80.sh` 的 `apply`/`rollback-code`
-要求人工审批的 release-id、40 位 commit、镜像 SHA-256 和证据文件（`complete-browser`
-甚至要求真人登录点完 8 个页面留证据），没法安全压成 dp80 里的一次按键——这么做等于绕过
-整套审批闸门。真要在 dp80 里接部署/回滚，得先定好接到 SOP 哪一步（多半只能是"列出已
-`prepare` 好的 release manifest 供选择，再 ssh 执行 `apply`"这种不替用户做审批决定的
-形态），这是待定的独立功能，不是现在这版的范围。
+`d` 读取 `/Users/geojol/Documents/Projects/datacenter-kimi/release-manifest/production-80/`
+下最新的 release（ID 以 UTC 时间戳开头，字典序即时间序），确认屏显示 release id /
+commit / 版本号。注意 apply 只能部署**已 prepare 的包**——8082 出了新东西要先
+`production-80.sh prepare` 生成新 manifest，`d` 自动就会捡到最新的那个。
 
 ## 面板内容
 
