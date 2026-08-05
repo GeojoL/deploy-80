@@ -383,11 +383,12 @@ func (m model) renderBoardContent() string {
 	rightBox := databasePaneStyle.Height(h).Render(right)
 	sb.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, leftBox, "  ", rightBox) + "\n\n")
 
-	// Command bar
+	// Command bar：只列真正接了处理逻辑的键。production-80.sh 的 apply/
+	// rollback-code 需要人工审批的 release-id、commit、镜像哈希和证据文件，
+	// 没法安全压成一次按键，所以这里不摆 d)eploy — 免得挂一个按了没反应的死键。
 	sb.WriteString(dim.Render(strings.Repeat("─", innerTextWidth)) + "\n")
 	sb.WriteString(
-		cmdKey.Render("d") + cmdDim.Render(")eploy  ") +
-			cmdKey.Render("r") + cmdDim.Render(")ollback  ") +
+		cmdKey.Render("r") + cmdDim.Render(")efresh  ") +
 			cmdKey.Render("m") + cmdDim.Render(")erge  ") +
 			cmdKey.Render("l") + cmdDim.Render(")ogs  ") +
 			cmdKey.Render("q") + cmdDim.Render(")uit"))
