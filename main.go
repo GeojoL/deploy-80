@@ -459,18 +459,47 @@ func (m model) View() string {
 	case screenLog:
 		var sb strings.Builder
 		sb.WriteString("\n")
-		// 分离审计和日志部分，分别着色
+
+		// 分离审计和日志部分
 		parts := strings.Split(m.logContent, "=== 后端日志")
+
+		// 审计部分（带框）
 		if len(parts) > 0 {
-			// 审计部分（绿色）
 			auditPart := strings.TrimPrefix(parts[0], "=== 迁移审计历史 ===\n")
-			sb.WriteString(green.Render("📋 迁移历史\n") + dim.Render(strings.TrimSpace(auditPart)) + "\n\n")
+			auditLines := strings.Split(strings.TrimSpace(auditPart), "\n")
+			auditBox := lipgloss.NewStyle().
+				BorderStyle(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("2")).
+				Padding(0, 1).
+				Render(strings.Join(auditLines, "\n"))
+			sb.WriteString(green.Render("📋 迁移历史\n"))
+			sb.WriteString(lipgloss.NewStyle().MarginLeft(2).Render(auditBox))
+			sb.WriteString("\n\n")
 		}
+
+		// 日志部分（带框）
 		if len(parts) > 1 {
-			// 日志部分（默认色）
 			logPart := strings.TrimPrefix(parts[1], " ===\n")
-			sb.WriteString(cyan.Render("🔍 日志（已过滤 livez 噪音）\n") + strings.TrimSpace(logPart) + "\n")
+			logLines := strings.Split(strings.TrimSpace(logPart), "\n")
+			// 截断过长的行
+			var truncatedLines []string
+			for _, line := range logLines {
+				if len(line) > 100 {
+					truncatedLines = append(truncatedLines, line[:97]+"...")
+				} else {
+					truncatedLines = append(truncatedLines, line)
+				}
+			}
+			logBox := lipgloss.NewStyle().
+				BorderStyle(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("6")).
+				Padding(0, 1).
+				Render(strings.Join(truncatedLines, "\n"))
+			sb.WriteString(cyan.Render("🔍 日志（已过滤 livez 噪音）\n"))
+			sb.WriteString(lipgloss.NewStyle().MarginLeft(2).Render(logBox))
+			sb.WriteString("\n")
 		}
+
 		sb.WriteString("\n  " + dim.Render("[Esc/q] back") + "\n")
 		return sb.String()
 	}
