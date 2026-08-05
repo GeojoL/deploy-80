@@ -12,6 +12,20 @@ import (
 
 // ── styles ────────────────────────────────────────────────────────────────────
 
+// lipgloss Width(N) sets the box width *inside the border but including
+// padding* — usable text width is N minus (2 × horizontal padding), and
+// the fully rendered block (with border) is N+2 wide. outerContentWidth
+// is that N for the single outer frame (Padding(1,2) → 2 each side), so
+// usable text width inside the frame is outerContentWidth-4 = innerTextWidth.
+const outerContentWidth = 80
+const innerTextWidth = outerContentWidth - 4
+
+// paneWidth is the lipgloss Width() of each side-by-side module box
+// (RELEASES / DATABASE), Padding(0,1) → usable text width is paneWidth-2.
+// Two panes + border(2 each) + 2-space gap must fill innerTextWidth exactly:
+// 2*(paneWidth+2) + 2 == innerTextWidth(76) → paneWidth = 35.
+const paneWidth = 35
+
 var (
 	cyan   = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
 	bold   = lipgloss.NewStyle().Bold(true)
@@ -20,19 +34,17 @@ var (
 	yellow = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 	red    = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
 
-	headerStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("6")).
-			BorderStyle(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("6")).
-			Padding(0, 1).
-			MarginLeft(2)
-
+	titleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
 	sectionLabel = lipgloss.NewStyle().Bold(true)
 	cmdKey       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
 	cmdDim       = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 
-	paneWidth = 38
+	// outerStyle is the single frame around the entire TUI, every screen.
+	outerStyle = lipgloss.NewStyle().
+			BorderStyle(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("6")).
+			Padding(1, 2).
+			Width(outerContentWidth)
 
 	releasesPaneStyle = lipgloss.NewStyle().
 				BorderStyle(lipgloss.RoundedBorder()).
@@ -48,6 +60,28 @@ var (
 
 	paneTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
 )
+
+// renderFramed wraps any screen's inner content in the single outer frame.
+func renderFramed(content string) string {
+	return outerStyle.Render(content)
+}
+
+// lineCount returns the number of visual lines in s (ignoring a trailing "\n").
+func lineCount(s string) int {
+	return len(strings.Split(strings.TrimRight(s, "\n"), "\n"))
+}
+
+// truncateLine clips s to at most max visible runes, adding "…" if clipped.
+func truncateLine(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	if max <= 1 {
+		return string(r[:max])
+	}
+	return string(r[:max-1]) + "…"
+}
 
 // ── SSH helpers ───────────────────────────────────────────────────────────────
 
@@ -182,11 +216,13 @@ const (
 )
 
 type model struct {
-	board      boardData
-	loading    bool
-	screen     screen
-	logContent string
-	err        string
+	board       boardData
+	loading     bool
+	screen      screen
+	logContent  string // screenMerging: raw migration script output
+	auditText   string // screenLog: raw psql audit rows
+	backendLogs string // screenLog: raw filtered backend logs
+	err         string
 }
 
 type boardLoaded boardData
@@ -200,16 +236,18 @@ func loadBoard() tea.Msg {
 
 // ── render helpers ────────────────────────────────────────────────────────────
 
+// colorStatus reduces a verbose docker status ("Up 15 hours (healthy)") to
+// a short, uniform-length word so STATUS rows don't end ragged.
 func colorStatus(state string) string {
 	switch {
 	case strings.Contains(state, "healthy"):
-		return green.Bold(true).Render("● ") + green.Render(state)
+		return green.Render("● healthy")
 	case strings.Contains(state, "Up"):
-		return green.Render("● " + state)
+		return green.Render("● running")
 	case state == "":
-		return dim.Render("--")
+		return dim.Render("○ unknown")
 	default:
-		return red.Bold(true).Render("● ") + red.Render(state)
+		return red.Render("● down")
 	}
 }
 
@@ -242,7 +280,7 @@ func (m model) renderReleasesPane() string {
 	d := m.board
 	var sb strings.Builder
 	sb.WriteString(paneTitle.Render("RELEASES") + "\n")
-	sb.WriteString(dim.Render("live: ") + green.Render(d.currentCommit) + "\n")
+	sb.WriteString(fmt.Sprintf("%-8s %s\n", "live", green.Render(d.currentCommit)))
 
 	if len(d.releases) == 0 {
 		sb.WriteString(dim.Render("(none)") + "\n")
@@ -250,29 +288,28 @@ func (m model) renderReleasesPane() string {
 	}
 
 	for i, r := range d.releases {
-		commit := "--"
+		commit := ""
 		if i < len(d.releaseCommits) {
 			commit = d.releaseCommits[i]
 		}
-		isLive := commit != "--" && d.currentCommit != "" && strings.HasPrefix(d.currentCommit, commit)
+		if commit == "" || commit == "--" {
+			commit = "--------"
+		}
+		isLive := commit != "--------" && d.currentCommit != "" && strings.HasPrefix(d.currentCommit, commit)
 
 		// 提取时间戳：20260803T074303Z → "08-03"
-		var timeStr string
+		timeStr := r
 		if len(r) >= 8 {
 			timeStr = r[4:6] + "-" + r[6:8]
-		} else {
-			timeStr = r
 		}
 
-		var marker, status string
+		// 先对纯文本定宽，再统一上色，避免 ANSI 转义码干扰 %s 宽度计算
+		label := fmt.Sprintf("%-8s %-5s", commit, timeStr)
 		if isLive {
-			marker = green.Bold(true).Render("●")
-			status = green.Render(fmt.Sprintf("%s %s (live)", commit, timeStr))
+			sb.WriteString(green.Bold(true).Render("●") + " " + green.Render(label+" live") + "\n")
 		} else {
-			marker = dim.Render("○")
-			status = dim.Render(fmt.Sprintf("%s %s", commit, timeStr))
+			sb.WriteString(dim.Render("○") + " " + dim.Render(label) + "\n")
 		}
-		sb.WriteString(fmt.Sprintf("%s %s\n", marker, status))
 	}
 	return sb.String()
 }
@@ -281,94 +318,79 @@ func (m model) renderDatabasePane() string {
 	d := m.board
 	var sb strings.Builder
 	sb.WriteString(paneTitle.Render("DATABASE") + "\n")
-	sb.WriteString(dim.Render("prod :80  vs  test :8082") + "\n")
+	sb.WriteString(dim.Render("prod :80 vs test :8082") + "\n")
 
-	// 对齐的表格：固定宽度列
-	sb.WriteString(dim.Render(""))  // space for alignment
-	sb.WriteString(fmt.Sprintf("%8s %8s   %s\n", ":80", ":8082", "diff"))
-	sb.WriteString(fmt.Sprintf("%-7s %8s %8s   %s\n",
-		"songs",
-		bold.Render(d.songs80),
-		d.songs82,
-		colorDiff(d.songs80, d.songs82)))
-	sb.WriteString(fmt.Sprintf("%-7s %8s %8s   %s\n",
-		"artists",
-		bold.Render(d.artists80),
-		d.artists82,
-		colorDiff(d.artists80, d.artists82)))
-
+	// 表格：每行用同一个格式串（含空标签的表头行），保证列对齐；数值先在
+	// 纯文本上定宽 padNum 再整体上色。注意：colored Render() 绝不能喂入带
+	// 尾部 \n 的字符串——lipgloss 会把换行后的"空尾段"补齐到上一行等宽，
+	// 这些空格会串到下一行开头，把表格撑得错位换行。所以 \n 一律在
+	// Render() 之外单独拼接。
+	padNum := func(v string) string { return fmt.Sprintf("%8s", v) }
+	row := func(label, v80, v82, diff string) string {
+		return fmt.Sprintf("%-7s %s %s  %s", label, v80, v82, diff)
+	}
+	sb.WriteString(dim.Render(row("", padNum(":80"), padNum(":8082"), "diff")) + "\n")
+	sb.WriteString(row("songs", bold.Render(padNum(d.songs80)), padNum(d.songs82), colorDiff(d.songs80, d.songs82)) + "\n")
+	sb.WriteString(row("artists", bold.Render(padNum(d.artists80)), padNum(d.artists82), colorDiff(d.artists80, d.artists82)) + "\n")
 	sb.WriteString("\n")
+
 	var s80, s82 int
 	fmt.Sscan(d.songs80, &s80)
 	fmt.Sscan(d.songs82, &s82)
-	if s82 > s80 {
-		sb.WriteString(yellow.Bold(true).Render("⚠ ") +
-			yellow.Render(fmt.Sprintf("%d songs new", s82-s80)) + "\n" +
-			dim.Render("  press m to merge") + "\n")
-	} else if s82 == s80 {
+	switch {
+	case s82 > s80:
+		sb.WriteString(yellow.Render(fmt.Sprintf("⚠ %d songs new", s82-s80)) + "\n")
+		sb.WriteString(dim.Render("press m to merge") + "\n")
+	case s82 == s80:
 		sb.WriteString(green.Render("✓ synced") + "\n")
-	} else {
+	default:
 		sb.WriteString(red.Render("✗ 80 ahead") + "\n")
 	}
 	return sb.String()
 }
 
-func truncate(s string, n int) string {
-	if n < 1 || len(s) <= n {
-		return s
-	}
-	if n <= 1 {
-		return s[:n]
-	}
-	return s[:n-1] + "…"
-}
-
-func (m model) renderBoard() string {
+// renderBoardContent builds the inner content of the board screen — the
+// outer frame itself is applied once, uniformly, in View().
+func (m model) renderBoardContent() string {
 	var sb strings.Builder
 	d := m.board
 
-	sb.WriteString("\n")
-	sb.WriteString(headerStyle.Render("Jose  ·  :80 Deploy Panel") + "\n\n")
+	sb.WriteString(titleStyle.Render("Jose · :80 Deploy Panel") + "\n\n")
 
-	// Top strip: container status (compact)
+	// STATUS：一行一项，label 定宽对齐，不同信息不挤同一行
+	sb.WriteString(sectionLabel.Render("STATUS") + "\n")
 	cmap := map[string]string{}
 	for _, c := range d.containers {
 		cmap[c.name] = c.state
 	}
-	// 简洁格式：backend● scheduler● proxy● db●
-	var statuses []string
 	for _, name := range []string{"backend", "scheduler", "proxy", "db"} {
-		st := cmap[name]
-		var icon string
-		if strings.Contains(st, "healthy") || strings.Contains(st, "Up") {
-			icon = green.Render("●")
-		} else {
-			icon = red.Render("●")
-		}
-		statuses = append(statuses, name+icon)
+		sb.WriteString(fmt.Sprintf("  %-16s %s\n", name, colorStatus(cmap[name])))
 	}
-	sb.WriteString("  " + dim.Render("containers: ") + strings.Join(statuses, " ") + "\n")
+	sb.WriteString(fmt.Sprintf("  %-16s %s\n", "livez local", colorHTTP(d.livezLocal)))
+	sb.WriteString(fmt.Sprintf("  %-16s %s\n", "livez public", colorHTTP(d.livezPub)))
+	sb.WriteString(fmt.Sprintf("  %-16s %s\n", "image backend", dim.Render(d.beImage)))
+	sb.WriteString(fmt.Sprintf("  %-16s %s\n", "image web", dim.Render(d.weImage)))
+	sb.WriteString("\n")
 
-	// Health checks + images (second line)
-	sb.WriteString("  " + dim.Render("livez: ") + "local " + colorHTTP(d.livezLocal) + " • " +
-		"public " + colorHTTP(d.livezPub) +
-		dim.Render(" • ") + dim.Render("be:"+d.beImage+" we:"+d.weImage) + "\n\n")
+	// Two-pane row：RELEASES | DATABASE，两个模块高度对齐，不一长一短。
+	// 两个面板内容都以 "\n" 结尾——必须先剪掉，否则 lipgloss 会把换行后
+	// 的空尾段当成真实一行渲染，实际高度比 lineCount() 多算 1 行，且两边
+	// 多出来的量还可能不一样，Height() 对齐就失效了。
+	left := strings.TrimRight(m.renderReleasesPane(), "\n")
+	right := strings.TrimRight(m.renderDatabasePane(), "\n")
+	h := max(lineCount(left), lineCount(right))
+	leftBox := releasesPaneStyle.Height(h).Render(left)
+	rightBox := databasePaneStyle.Height(h).Render(right)
+	sb.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, leftBox, "  ", rightBox) + "\n\n")
 
-	// Two-pane row: releases | database
-	left := releasesPaneStyle.Render(m.renderReleasesPane())
-	right := databasePaneStyle.Render(m.renderDatabasePane())
-	row := lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right)
-	sb.WriteString(lipgloss.NewStyle().MarginLeft(2).Render(row) + "\n")
-
-	// Command bar (simplified)
-	sb.WriteString("\n  " + dim.Render(strings.Repeat("─", 2*paneWidth+10)) + "\n")
-	sb.WriteString("  " +
+	// Command bar
+	sb.WriteString(dim.Render(strings.Repeat("─", innerTextWidth)) + "\n")
+	sb.WriteString(
 		cmdKey.Render("d") + cmdDim.Render(")eploy  ") +
-		cmdKey.Render("r") + cmdDim.Render(")ollback  ") +
-		cmdKey.Render("m") + cmdDim.Render(")erge  ") +
-		cmdKey.Render("l") + cmdDim.Render(")ogs  ") +
-		cmdKey.Render("q") + cmdDim.Render(")uit") +
-		"\n\n")
+			cmdKey.Render("r") + cmdDim.Render(")ollback  ") +
+			cmdKey.Render("m") + cmdDim.Render(")erge  ") +
+			cmdKey.Render("l") + cmdDim.Render(")ogs  ") +
+			cmdKey.Render("q") + cmdDim.Render(")uit"))
 
 	return sb.String()
 }
@@ -401,9 +423,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case "l":
 				m.screen = screenLog
-				audit := fetchAuditLog()
-				logs := fetchBackendLogsClean()
-				m.logContent = fmt.Sprintf("=== 迁移审计历史 ===\n%s\n\n=== 后端日志（已过滤噪音）===\n%s", audit, logs)
+				m.auditText = fetchAuditLog()
+				m.backendLogs = fetchBackendLogsClean()
 				return m, nil
 			}
 		case screenConfirmMerge:
@@ -464,76 +485,106 @@ func runMerge() tea.Msg {
 	return mergeStarted(string(out))
 }
 
+// formatAuditTable turns pipe-delimited psql rows (id|time|count|status)
+// into a column-aligned table: widths are computed per column so every
+// row lines up, instead of drifting with each promotion_id's length.
+func formatAuditTable(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return []string{dim.Render("(no migration history)")}
+	}
+
+	type row struct{ id, t, n, status string }
+	var rows []row
+	widths := [4]int{2, 4, 5, 6} // header minimums: id,time,count,status
+
+	for _, l := range strings.Split(raw, "\n") {
+		f := strings.Split(l, "|")
+		for len(f) < 4 {
+			f = append(f, "")
+		}
+		r := row{
+			truncateLine(strings.TrimSpace(f[0]), 28),
+			strings.TrimSpace(f[1]),
+			strings.TrimSpace(f[2]),
+			strings.TrimSpace(f[3]),
+		}
+		rows = append(rows, r)
+		widths[0] = max(widths[0], len([]rune(r.id)))
+		widths[1] = max(widths[1], len([]rune(r.t)))
+		widths[2] = max(widths[2], len([]rune(r.n)))
+		widths[3] = max(widths[3], len([]rune(r.status)))
+	}
+
+	out := []string{fmt.Sprintf("%-*s  %-*s  %*s  %-*s",
+		widths[0], "id", widths[1], "time", widths[2], "count", widths[3], "status")}
+	for _, r := range rows {
+		statusColor := dim
+		switch r.status {
+		case "completed":
+			statusColor = green
+		case "failed":
+			statusColor = red
+		case "running":
+			statusColor = yellow
+		}
+		out = append(out, fmt.Sprintf("%-*s  %-*s  %*s  %s",
+			widths[0], r.id, widths[1], r.t, widths[2], r.n,
+			statusColor.Render(fmt.Sprintf("%-*s", widths[3], r.status))))
+	}
+	if len(out) > 9 {
+		out = out[:9]
+		out = append(out, dim.Render("…"))
+	}
+	return out
+}
+
 func (m model) View() string {
 	switch m.screen {
 	case screenBoard:
 		if m.loading {
-			return "\n  " + dim.Render("loading…") + "\n"
+			return renderFramed(dim.Render("loading…"))
 		}
-		return m.renderBoard()
+		return renderFramed(m.renderBoardContent())
 
 	case screenConfirmMerge:
-		return "\n" +
-			"  " + bold.Render("Merge :8082 business data → :80") + "\n\n" +
-			"  " + yellow.Render("This will INSERT new songs into production. Continue?") + "\n\n" +
-			"  " + cmdKey.Render("[y]") + dim.Render("es   ") +
-			cmdKey.Render("[n]") + dim.Render("/Esc cancel") + "\n\n"
+		content := titleStyle.Render("Merge :8082 business data → :80") + "\n\n" +
+			yellow.Render("This will INSERT new songs into production.") + "\n" +
+			yellow.Render("Continue?") + "\n\n" +
+			cmdKey.Render("[y]") + dim.Render("es") + "\n" +
+			cmdKey.Render("[n]") + dim.Render("/Esc cancel")
+		return renderFramed(content)
 
 	case screenMerging:
 		if m.logContent == "" {
-			return "\n  " + dim.Render("running migration…") + "\n"
+			return renderFramed(dim.Render("running migration…"))
 		}
-		return "\n" + m.logContent + "\n\n  " + dim.Render("[Enter] back") + "\n"
+		return renderFramed(m.logContent + "\n\n" + dim.Render("[Enter] back"))
 
 	case screenLog:
 		var sb strings.Builder
-		sb.WriteString("\n  " + green.Render("📋 迁移历史") + "\n")
+		sb.WriteString(titleStyle.Render("Jose · :80 Deploy Panel — Logs") + "\n\n")
 
-		// 分离审计和日志部分
-		parts := strings.Split(m.logContent, "=== 后端日志")
+		sb.WriteString(green.Bold(true).Render("MIGRATION HISTORY") + "\n")
+		for _, line := range formatAuditTable(m.auditText) {
+			sb.WriteString("  " + line + "\n")
+		}
+		sb.WriteString("\n")
 
-		// 审计部分：简单显示
-		if len(parts) > 0 {
-			auditPart := strings.TrimPrefix(parts[0], "=== 迁移审计历史 ===\n")
-			auditLines := strings.Split(strings.TrimSpace(auditPart), "\n")
-
-			displayLines := auditLines
-			if len(displayLines) == 0 || displayLines[0] == "" {
-				displayLines = []string{dim.Render("(无迁移记录)")}
-			} else if len(displayLines) > 8 {
-				displayLines = displayLines[:8]
-				displayLines = append(displayLines, dim.Render("..."))
-			}
-
-			for _, line := range displayLines {
-				sb.WriteString("  " + line + "\n")
-			}
+		sb.WriteString(cyan.Bold(true).Render("BACKEND LOGS") + "\n")
+		logLines := strings.Split(strings.TrimSpace(m.backendLogs), "\n")
+		if len(logLines) == 0 || logLines[0] == "" {
+			logLines = []string{"(no recent business activity)"}
+		} else if len(logLines) > 12 {
+			logLines = append(logLines[:12], "…")
+		}
+		for _, line := range logLines {
+			sb.WriteString("  " + dim.Render(truncateLine(line, innerTextWidth-2)) + "\n")
 		}
 
-		sb.WriteString("\n  " + cyan.Render("🔍 日志") + "\n")
-
-		// 日志部分：简单显示
-		if len(parts) > 1 {
-			logPart := strings.TrimPrefix(parts[1], " ===\n")
-			logLines := strings.Split(strings.TrimSpace(logPart), "\n")
-
-			displayLines := logLines
-			if len(displayLines) > 12 {
-				displayLines = displayLines[:12]
-				displayLines = append(displayLines, dim.Render("..."))
-			}
-
-			for _, line := range displayLines {
-				// 截断过长行
-				if len(line) > 80 {
-					line = line[:77] + "..."
-				}
-				sb.WriteString("  " + line + "\n")
-			}
-		}
-
-		sb.WriteString("\n  " + dim.Render("[Esc/q] back") + "\n")
-		return sb.String()
+		sb.WriteString("\n" + dim.Render(strings.Repeat("─", innerTextWidth)) + "\n")
+		sb.WriteString(dim.Render("[Esc/q] back"))
+		return renderFramed(sb.String())
 	}
 	return ""
 }
@@ -544,7 +595,7 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "status" {
 		d := fetchBoard()
 		m := model{board: d}
-		fmt.Println(m.renderBoard())
+		fmt.Println(renderFramed(m.renderBoardContent()))
 		return
 	}
 
