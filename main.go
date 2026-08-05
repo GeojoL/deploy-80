@@ -653,17 +653,30 @@ func formatAuditTable(raw string) []string {
 	return out
 }
 
-// tailFramed renders the last n lines of raw script output, each clipped
-// to the frame's text width so long lines can't burst the border.
+// tailFramed renders the last n visual lines of raw script output. Long
+// lines are wrapped (not clipped) to the frame's text width — error
+// messages must stay fully readable; only excess height is trimmed.
 func tailFramed(raw string, n int) string {
-	lines := strings.Split(strings.TrimRight(raw, "\n"), "\n")
-	if len(lines) > n {
-		lines = append([]string{dim.Render("… (earlier output omitted)")}, lines[len(lines)-n:]...)
+	var wrapped []string
+	for _, l := range strings.Split(strings.TrimRight(raw, "\n"), "\n") {
+		r := []rune(l)
+		if len(r) == 0 {
+			wrapped = append(wrapped, "")
+			continue
+		}
+		for len(r) > 0 {
+			w := len(r)
+			if w > innerTextWidth {
+				w = innerTextWidth
+			}
+			wrapped = append(wrapped, string(r[:w]))
+			r = r[w:]
+		}
 	}
-	for i, l := range lines {
-		lines[i] = truncateLine(l, innerTextWidth)
+	if len(wrapped) > n {
+		wrapped = append([]string{dim.Render("… (earlier output omitted)")}, wrapped[len(wrapped)-n:]...)
 	}
-	return strings.Join(lines, "\n")
+	return strings.Join(wrapped, "\n")
 }
 
 func (m model) View() string {
