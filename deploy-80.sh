@@ -136,6 +136,21 @@ draw() {
     echo ""
 }
 
+# ── content gates ─────────────────────────────────────────────────────
+# 2026-08-05 事故防复发:web 镜像若构建时丢 VITE_SONG_USAGE_ENABLED=true,
+# Vite 会把 Explore「歌曲使用量」整列 tree-shake 掉,而 images.txt 的
+# song_usage_enabled=true 是硬编码字符串、不校验镜像实体。此闸直接查镜像内容。
+_gate_web_image() {   # $1 = web image id/tag on gandalf → 0 通过
+    local img="$1" hits
+    hits=$(_ssh "docker run --rm --entrypoint sh $img -c 'grep -l 歌曲使用量 /usr/share/nginx/html/assets/Explore-*.js 2>/dev/null | wc -l'")
+    [[ "${hits:-0}" -ge 1 ]]
+}
+_gate_live_80() {     # 线上 :80 的 Explore chunk 实测 → 0 通过
+    local hits
+    hits=$(_ssh "docker exec datacenter-kimi-production-proxy-1 sh -c 'grep -l 歌曲使用量 /usr/share/nginx/html/assets/Explore-*.js 2>/dev/null | wc -l'")
+    [[ "${hits:-0}" -ge 1 ]]
+}
+
 # ── actions ───────────────────────────────────────────────────────────
 do_deploy() {
     local rid; rid=$(_latest_release)
@@ -167,12 +182,28 @@ except Exception as e:
     fi
     [[ -z "$mp" || ! -f "$mp" ]] && { err "manifest not found: $mp"; return; }
 
+    local web_img
+    web_img=$(python3 -c "import json; print(json.load(open('$mp'))['release']['web_image'])" 2>/dev/null)
+    say "content gate: checking Explore 歌曲使用量 in candidate web image …"
+    if ! _gate_web_image "$web_img"; then
+        err "REFUSED: candidate web image lacks Explore 歌曲使用量 (built without VITE_SONG_USAGE_ENABLED=true)"
+        err "rebuild via scripts/build-release-images.sh or docker build --build-arg VITE_SONG_USAGE_ENABLED=true"
+        return
+    fi
+    say "content gate passed"
+
     cd "$LOCAL_REPO"
     say "apply …"
     bash "$DEPLOY_TOOL" apply "$mp" --execute --allow-port80-downtime 2>&1 || { err "apply failed"; return; }
 
     say "verify …"
     bash "$DEPLOY_TOOL" verify "$mp" 2>&1 || { warn "verify returned non-zero — check output above"; return; }
+
+    if _gate_live_80; then
+        say "live gate: :80 Explore 歌曲使用量 present"
+    else
+        err "live gate FAILED: :80 Explore chunk lacks 歌曲使用量 — investigate before completing"
+    fi
 
     echo ""
     echo -n "  ${B}Browser evidence JSON path (Enter to skip):${R} "
@@ -208,27 +239,7 @@ do_rollback() {
 do_merge() {
     echo ""
     echo -e "  ${B}Merge :8082 business data → :80${R}"
-    echo -e "  ${DIM}Migrates songs (and other tables) from 8082 to 80 via dblink${R}"
-    echo ""
-    echo -n "  ${YL}[g]o  [Enter] cancel:${R} "
-    read -r choice
-    case "$choice" in
-        g)
-            echo -n "  ${RD}${B}Write to production DB. Confirm? [y/N]${R} "
-            read -r REPLY
-            [[ "$REPLY" =~ ^[Yy]$ ]] || { say "cancelled"; return; }
-            local script_dir; script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-            local local_script="$script_dir/migrate-songs.sh"
-            [[ ! -f "$local_script" ]] && { err "migrate-songs.sh not found at $local_script"; return; }
-            say "copying migration script to gandalf …"
-            scp -q "$local_script" "${SSH_HOST}:/tmp/migrate-songs.sh"
-            say "running migration …"
-            ssh -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=120 "$SSH_HOST" \
-                "bash /tmp/migrate-songs.sh" 2>&1
-            say "merge complete"
-            ;;
-        *) say "cancelled" ;;
-    esac
+    err "disabled in the legacy shell panel; use the Go dp80 TUI and press m"
 }
 
 do_logs() {
